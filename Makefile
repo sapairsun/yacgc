@@ -15,13 +15,13 @@ BUILD_DIR := build
 SRC_DIR := src
 TEST_DIR := test
 
-LIB := $(BUILD_DIR)/libgc.a
+LIB := $(BUILD_DIR)/libyacgc.a
 ifeq ($(OS),Windows_NT)
-SHARED_LIB := $(BUILD_DIR)/libgc.dll
+SHARED_LIB := $(BUILD_DIR)/libyacgc.dll
 else ifeq ($(shell uname -s),Darwin)
-SHARED_LIB := $(BUILD_DIR)/libgc.dylib
+SHARED_LIB := $(BUILD_DIR)/libyacgc.dylib
 else
-SHARED_LIB := $(BUILD_DIR)/libgc.so
+SHARED_LIB := $(BUILD_DIR)/libyacgc.so
 endif
 TEST_BINS := $(BUILD_DIR)/example_conservative $(BUILD_DIR)/example_precise $(BUILD_DIR)/example_service $(BUILD_DIR)/example_multithread
 EXAMPLE_BIN := $(BUILD_DIR)/example_service

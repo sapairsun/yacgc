@@ -1,57 +1,59 @@
 # yacgc: Yet Another C Garbage Collector
 
-一个用 C 语言从零实现的 GC 库（不依赖外部第三方库），目标是在“没有虚拟机”的前提下，尽可能提供类似 Go GC 的使用体验：业务侧主要使用 `gc_malloc` 进行分配，由 GC 负责回收。
+[English](README.md) | [中文](README-CN.md)
 
-本项目同时支持两种根集合获取方式：
-- 保守式（Conservative）：通过扫描各线程的寄存器快照与栈内存，推断可能的指针并做标记。
-- 精确式（Precise）：通过 shadow stack（精确根集合）保证“不会误保活”，适合常驻服务对内存稳定性要求较高的场景。
+A garbage collector library implemented from scratch in C (no external third-party dependencies). The goal is to offer a Go-like GC experience even without a VM: application code primarily allocates via `gc_malloc`, and the GC takes care of reclamation.
 
-并且提供多线程 stop-the-world（STW）支持：在 GC 期间暂停其它线程，扫描它们的栈/寄存器/精确根，再恢复线程运行。
+This project supports two ways to obtain the root set:
+- Conservative: scan each thread’s register snapshot and stack memory, treating word values as potential pointers.
+- Precise: use a per-thread shadow stack (precise roots) to avoid false retention, suitable for long-running services that require stable memory behavior.
 
-## 目录结构
+It also provides multi-thread stop-the-world (STW) support: during GC, other threads are paused, their stacks/registers/precise roots are scanned, and then they are resumed.
+
+## Layout
 
 - include/
-  - gc.h：公共 API（分配/回收/统计/模式切换）
-  - gc_conservative.h：保守模式相关 API
-  - gc_precise.h：精确模式（shadow stack）相关 API
+  - gc.h: public API (allocation/collection/stats/mode switching)
+  - gc_conservative.h: conservative-mode specific API
+  - gc_precise.h: precise-mode (shadow stack) API
 - src/
-  - gc_core.c：分配 + mark/sweep 核心流程（调度不同模式的 root 扫描）
-  - gc_conservative.c：保守模式 root 扫描
-  - gc_precise.c：精确模式 shadow stack 与精确 root 扫描
-  - gc_stack.c：跨平台获取线程栈边界
-  - gc_threads.c：线程注册、全局锁、STW（POSIX/Windows）实现
+  - gc_core.c: allocation + mark/sweep core (dispatches root scanning by mode)
+  - gc_conservative.c: conservative root scanning
+  - gc_precise.c: shadow stack implementation + precise root scanning
+  - gc_stack.c: cross-platform stack bounds discovery
+  - gc_threads.c: thread attachment, global lock, STW (POSIX/Windows)
 - test/
-  - example_conservative.c：保守模式示例（仅 `gc_malloc`）
-  - example_precise.c：精确模式示例（shadow stack）
-  - example_service.c：常驻服务风格示例（精确模式 + 周期性 GC）
-  - example_multithread.c：多线程并发分配示例
+  - example_conservative.c: conservative example (only `gc_malloc`)
+  - example_precise.c: precise example (shadow stack)
+  - example_service.c: long-running service style example (precise + periodic GC)
+  - example_multithread.c: multi-thread concurrent allocation example
 
-## 构建与运行
+## Build & Run
 
-- 编译静态库 + 动态库 + 示例可执行文件：
+- Build the static library, shared library, and all example executables:
 
 ```bash
 make all
 ```
 
-- 运行示例（作为测试用例）：
+- Run examples (as test cases):
 
 ```bash
 make test
 ```
 
-产物位于 `build/`：
-- 静态库：`libgc.a`
-- 动态库：按平台生成
-  - macOS：`libgc.dylib`
-  - Linux：`libgc.so`
-  - Windows：`libgc.dll`
+Artifacts are placed under `build/`:
+- Static library: `libyacgc.a`
+- Shared library (platform-specific):
+  - macOS: `libyacgc.dylib`
+  - Linux: `libyacgc.so`
+  - Windows: `libyacgc.dll`
 
-## 使用方式
+## Usage
 
-### 1）默认（保守式）——业务只用 gc_malloc
+### 1) Default (Conservative) — application only uses gc_malloc
 
-保守模式默认启用，线程第一次调用 `gc_malloc` 会自动完成初始化与线程注册。典型业务代码只需要使用 `gc_malloc` 分配即可：
+Conservative mode is enabled by default. On the first `gc_malloc` call, the current thread is automatically attached and initialization is performed lazily. Typical application code only needs to allocate via `gc_malloc`:
 
 ```c
 #include "gc.h"
@@ -79,9 +81,9 @@ int main(void) {
 }
 ```
 
-注意：保守式扫描可能产生“误保活”（false retention），长期运行可能出现“像泄漏一样的缓慢增长”。如果需要可证明的内存稳定性，使用精确模式。
+Note: conservative scanning can cause false retention. In long-running processes, this may show up as slow growth that looks like a leak. If you need provable memory stability, use precise mode.
 
-### 2）精确模式（shadow stack）——避免误保活
+### 2) Precise mode (shadow stack) — avoid false retention
 
 ```c
 #include "gc.h"
@@ -108,70 +110,70 @@ int main(void) {
 }
 ```
 
-精确模式的关键点是：GC 只扫描你显式登记的根（shadow stack），因此不会因为栈上残留的“假指针”而误保活对象。
+The key idea is that the GC only scans roots you explicitly register (shadow stack), so stack garbage will not accidentally keep objects alive.
 
-## 技术设计方案
+## Technical Design
 
-### 1）内存模型：非移动（non-moving）
+### 1) Memory model: non-moving
 
-本 GC 采用 non-moving 策略：
-- 对象地址稳定（便于和普通 C 指针协作）
-- 不做压缩/整理，简单可靠
+This GC is non-moving:
+- object addresses are stable (works naturally with C pointers)
+- no compaction, simpler and robust
 
-代价是：可能产生碎片（依赖底层 `malloc` 的分配策略），也不具备对象搬迁带来的局部性优化。
+Trade-off: fragmentation is possible (depends on the underlying `malloc` strategy), and there is no locality improvement from moving objects.
 
-### 2）分配：gc_malloc/gc_free
+### 2) Allocation: gc_malloc/gc_free
 
-每次分配会创建一个带头部的块：
-- 头部保存 `size/marked/next`
-- 返回给用户的是头部后面的 payload 指针
+Each allocation creates a block with a small header:
+- the header stores `size/marked/next`
+- the pointer returned to the user points to the payload (right after the header)
 
-所有对象通过单链表 `g_blocks` 维护，回收阶段 sweep 时将不可达对象摘链并 `free`。
+All blocks are tracked in a singly linked list `g_blocks`. During sweep, unreachable blocks are unlinked and freed.
 
-### 3）标记-清扫（Mark & Sweep）
+### 3) Mark & Sweep
 
-GC 一次周期：
-1. 清空所有对象的 `marked`
-2. 扫描 roots，将可达对象入栈（mark stack）
-3. 反复弹出对象并扫描对象内存，把其中“看起来像指针”的值当作潜在引用继续标记
-4. sweep：释放未标记对象
+A GC cycle:
+1. clear all `marked` flags
+2. scan roots and push reachable objects onto the mark stack
+3. repeatedly pop objects and scan their payload memory, treating machine words as potential pointers and marking newly found objects
+4. sweep: free unmarked objects
 
-这是保守式的对象扫描：对象 payload 会按机器字宽逐字扫描，将每个机器字当作候选指针。
+Object scanning is conservative: the payload is scanned word-by-word, interpreting each word as a candidate pointer.
 
-### 4）两种 root 获取模式
+### 4) Two root acquisition modes
 
-#### A. 保守模式（Conservative）
+#### A. Conservative mode
 
-根集合来源：
-- 各线程寄存器快照（通过 `setjmp` 把寄存器值落栈或复制到可扫描内存）
-- 各线程栈范围（扫描 SP 到 stack top / 或 stack bottom 到 SP，取决于栈增长方向）
+Root sources:
+- each thread’s register snapshot (via `setjmp`, making registers scannable)
+- each thread’s stack range (from SP to stack top, or stack bottom to SP depending on stack growth)
 
-跨平台栈边界：
-- macOS：`pthread_get_stackaddr_np/pthread_get_stacksize_np`
-- Linux：`pthread_getattr_np + pthread_attr_getstack`
-- Windows：优先 `GetCurrentThreadStackLimits`，否则用 `VirtualQuery` 估算区域
+Cross-platform stack bounds:
+- macOS: `pthread_get_stackaddr_np/pthread_get_stacksize_np`
+- Linux: `pthread_getattr_np + pthread_attr_getstack`
+- Windows: prefer `GetCurrentThreadStackLimits`, otherwise estimate via `VirtualQuery`
 
-#### B. 精确模式（Precise）
+#### B. Precise mode
 
-根集合来源：
-- shadow stack（每个线程一个 TLS 的 frame 链）
+Root sources:
+- shadow stack (a per-thread TLS-linked list of frames)
 
-业务在需要跨 GC 保活的局部指针上调用 `GC_SHADOW_ROOT(&fr, p)` 登记。GC 扫描所有线程登记的 shadow roots。
+Application code registers roots that must survive a GC via `GC_SHADOW_ROOT(&fr, p)`. The GC scans shadow roots from all threads.
 
-### 5）多线程与 stop-the-world（STW）
+### 5) Multithreading and stop-the-world (STW)
 
-本项目采用 STW 来保证并发安全的可达性分析：
-- 在进入 `gc_collect()` 时请求其它线程暂停
-- 扫描其它线程的寄存器快照与栈（保守模式）/shadow roots（精确模式）
-- sweep 完成后恢复其它线程继续执行
+This project uses STW to ensure safe reachability analysis:
+- on entering `gc_collect()`, request other threads to pause
+- scan other threads’ register snapshots and stacks (conservative) / shadow roots (precise)
+- resume other threads after sweep
 
-实现方式：
-- POSIX：通过 `pthread_kill(SIGUSR1)` 触发信号处理器，将线程“停住”并记录 SP/寄存器快照；GC 线程等待所有目标线程进入 parked 状态后继续。
-- Windows：通过 `SuspendThread/GetThreadContext` 获取目标线程上下文并暂停，结束后 `ResumeThread`。
+Implementation:
+- POSIX: use `pthread_kill(SIGUSR1)` to trigger a signal handler that parks the thread and records SP/register snapshots; the GC thread waits until all target threads are parked.
+- Windows: use `SuspendThread/GetThreadContext` to stop and snapshot thread context, then `ResumeThread`.
 
-### 6）可移植性边界与限制
+### 6) Portability boundaries and limitations
 
-GC 在纯 C 环境下做“像 Go 一样”的体验，必然存在边界：
-- 保守模式存在误保活风险（概率问题），适合“易用优先”的场景
-- 精确模式需要业务显式登记根，换取可证明的回收正确性与稳定性
-- STW 在 POSIX 依赖信号，对实时性敏感场景需谨慎（但实现上是标准做法）
+To provide a Go-like GC experience in pure C, some boundaries are inevitable:
+- conservative mode can retain objects spuriously (probabilistic), good for “ease of use first”
+- precise mode requires explicit root registration to guarantee stable memory behavior
+- POSIX STW relies on signals; be cautious in latency-sensitive environments (though this approach is standard)
